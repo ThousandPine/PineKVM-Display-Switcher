@@ -1,2 +1,4 @@
 *.log
 *.exe
+*.pid
+PineKVM-DisplaySwitcher-mac

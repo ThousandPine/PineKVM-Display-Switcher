@@ -21,8 +21,9 @@ class PineKVMDisplaySwitcher
     static string LogPath;
     static int PollIntervalMs = 1000;
     static double ConfirmSeconds = 0.5;
-    static string[] KeyboardPatterns = { "HID\\VID_373B&PID_1278*", "HID\\VID_373B&PID_11DA*" };
-    static string[] MousePatterns = { "HID\\VID_373B&PID_1278*", "HID\\VID_373B&PID_11DA*" };
+    // 键鼠模式只来自配置文件；配置缺失则为空数组，工具不会匹配任何设备
+    static string[] KeyboardPatterns = { };
+    static string[] MousePatterns = { };
 
     [DllImport("user32.dll")]
     static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
@@ -31,7 +32,7 @@ class PineKVMDisplaySwitcher
     {
         string dir = AppDomain.CurrentDomain.BaseDirectory;
         LogPath = Path.Combine(dir, "PineKVM-DisplaySwitcher.log");
-        LoadConfig(Path.Combine(dir, "PineKVM-DisplaySwitcher.config"));
+        LoadConfig();
 
         if (args.Length > 0)
         {
@@ -78,9 +79,28 @@ class PineKVMDisplaySwitcher
         }
     }
 
-    static void LoadConfig(string path)
+    // 配置查找顺序：exe 同目录 -> 项目根目录（config 是唯一一份，放仓库根目录）
+    static void LoadConfig()
     {
-        if (!File.Exists(path)) return;
+        string dir = AppDomain.CurrentDomain.BaseDirectory;
+        string[] candidates = new string[]
+        {
+            Path.Combine(dir, "PineKVM-DisplaySwitcher.config"),
+            Path.Combine(Directory.GetParent(dir) != null ? Directory.GetParent(dir).FullName : dir,
+                "PineKVM-DisplaySwitcher.config")
+        };
+        string path = null;
+        foreach (string c in candidates)
+        {
+            if (File.Exists(c)) { path = c; break; }
+        }
+        if (path == null)
+        {
+            Log("Config not found; no device patterns loaded, tool will not trigger. Expected: "
+                + Path.Combine(dir, "PineKVM-DisplaySwitcher.config"));
+            return;
+        }
+        Log("Config loaded: " + path);
         foreach (string raw in File.ReadAllLines(path, Encoding.UTF8))
         {
             string line = raw.Trim();
