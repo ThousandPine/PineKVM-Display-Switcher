@@ -111,6 +111,8 @@ PineKVM-Display-Switcher/
 - `ConfirmSeconds`：键鼠同时消失多久后触发（秒，默认 0.5，支持小数）
 - `KeyboardPatterns` / `MousePatterns`：共享键鼠的 VID/PID 前缀，分号分隔
 
+> **首次使用必须改设备 ID**：配置文件里的 `HID\VID_373B&PID_1278*`、`HID\VID_373B&PID_11DA*` 是示例值，不代表你的设备。请替换为你自己的键鼠 ID，否则工具不会匹配任何设备、不会触发。
+
 修改后需重启两端工具。
 
 **换键鼠后**：编辑 `KeyboardPatterns` / `MousePatterns` 为新设备的 VID/PID，保存后重启两端工具。查看当前键鼠 ID 的方法（Windows PowerShell）：
