@@ -83,11 +83,11 @@ class PineKVMDisplaySwitcher
     static void LoadConfig()
     {
         string dir = AppDomain.CurrentDomain.BaseDirectory;
+        string root = Path.GetFullPath(Path.Combine(dir, ".."));
         string[] candidates = new string[]
         {
             Path.Combine(dir, "PineKVM-DisplaySwitcher.config"),
-            Path.Combine(Directory.GetParent(dir) != null ? Directory.GetParent(dir).FullName : dir,
-                "PineKVM-DisplaySwitcher.config")
+            Path.Combine(root, "PineKVM-DisplaySwitcher.config")
         };
         string path = null;
         foreach (string c in candidates)
