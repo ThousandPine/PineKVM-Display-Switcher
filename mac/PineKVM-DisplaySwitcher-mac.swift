@@ -214,6 +214,26 @@ struct HIDDeviceInfo {
     var pattern: DevicePattern { DevicePattern(vid: vid, pid: pid) }
 }
 
+// 运行循环用：内核侧按 VID/PID 匹配，只问"有没有匹配设备在线"。
+// 不拉取任何设备属性（对比 scanMatchedDevices 的 IORegistryEntryCreateCFProperties：
+// 每次轮询每台设备都要从内核搬整份属性字典 + mach 消息，实测单核 ~28% CPU）。
+// 每个 (VID,PID) 模式一次轻量匹配调用，内核过滤后只返回命中的条目。
+func anyMatchedDevicePresent() -> Bool {
+    let patterns = Array(Set(keyboardPatterns + mousePatterns))
+    guard !patterns.isEmpty else { return false }
+    for p in patterns {
+        guard let matching = IOServiceMatching("IOHIDDevice") else { continue }
+        let dict = matching as NSMutableDictionary
+        dict["VendorID"] = NSNumber(value: p.vid)
+        dict["ProductID"] = NSNumber(value: p.pid)
+        var iter: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iter) == KERN_SUCCESS else { continue }
+        defer { IOObjectRelease(iter) }
+        if IOIteratorNext(iter) != 0 { return true }
+    }
+    return false
+}
+
 func scanMatchedDevices() -> [HIDDeviceInfo] {
     var out: [HIDDeviceInfo] = []
     let allPatterns = Set(keyboardPatterns + mousePatterns)
@@ -263,7 +283,7 @@ func run() {
         + "; Mouse: " + mousePatterns.map { $0.description }.joined(separator: ", "))
 
     while true {
-        let present = !scanMatchedDevices().isEmpty
+        let present = anyMatchedDevicePresent()
 
         if present {
             if blanked {
