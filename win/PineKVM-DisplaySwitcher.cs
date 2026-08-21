@@ -110,6 +110,12 @@ class PineKVMDisplaySwitcher
     [DllImport("user32.dll")]
     static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
 
+    [DllImport("user32.dll")]
+    static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+    const uint KEYEVENTF_KEYUP = 0x0002;
+    const byte VK_F24 = 0x87;
+
     [StructLayout(LayoutKind.Sequential)]
     struct LASTINPUTINFO
     {
@@ -328,28 +334,36 @@ class PineKVMDisplaySwitcher
     }
 
     // 实测 SC_MONITORPOWER(-1) 广播在本机无法真正点亮屏幕（需真实输入活动才唤醒），
-    // 与 Mac 端 caffeinate -u 对齐：注入 1px 鼠标位移（真实输入, 点亮并重置空闲计时器）,
-    // 并在独立线程持 ES_DISPLAY_REQUIRED 约 3 秒——防止空闲计时器已到期导致立刻重新
-    // 熄屏（本机熄屏超时 AC 20 分钟, 切去 Mac 超过该时长时正是此情形）; 释放时计时器归零
+    // 与 Mac 端 caffeinate -u 对齐：注入输入点亮并重置空闲计时器。但注入偶发被系统
+    // 丢弃（实测发生在设备重枚举窗口内: idle-after 仍为旧值, 且屏幕不亮, 需物理按键），
+    // 故持 ES_DISPLAY_REQUIRED 期间每 ~750ms 重试一次（鼠标位移 + F24 按键双路），
+    // 每次用 GetLastInputInfo 验证是否被接受, 直到计时器归零; 最多 6 次。
     static void WakeMonitor()
     {
-        Log("wake diagnostic: idle-before-jiggle=" + IdleSeconds() + "s");
+        Log("wake diagnostic: idle-before=" + IdleSeconds() + "s");
         SendMessage((IntPtr)HWND_BROADCAST, WM_SYSCOMMAND, (IntPtr)SC_MONITORPOWER, (IntPtr)(-1));
-        mouse_event(MOUSEEVENTF_MOVE, 1, 1, 0, UIntPtr.Zero);
         Thread holder = new Thread(() =>
         {
             try
             {
-                Thread.Sleep(300);
-                uint idleAfter = IdleSeconds();
-                Log("wake diagnostic: idle-after-jiggle=" + idleAfter + "s"
-                    + (idleAfter <= 1 ? " (jiggle counted as input, timer reset)"
-                                      : " (jiggle did NOT reset idle timer)"));
                 // ES_* 按线程生效: 设置与释放必须在同一线程完成
                 SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
-                Thread.Sleep(3000);
+                bool reset = false;
+                for (int attempt = 1; attempt <= 6 && !reset; attempt++)
+                {
+                    mouse_event(MOUSEEVENTF_MOVE, 1, 1, 0, UIntPtr.Zero);
+                    keybd_event(VK_F24, 0, 0, UIntPtr.Zero);
+                    keybd_event(VK_F24, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    Thread.Sleep(300);
+                    uint idle = IdleSeconds();
+                    reset = idle <= 1;
+                    Log("wake diagnostic: attempt " + attempt + " idle-after=" + idle + "s"
+                        + (reset ? " (input accepted, timer reset)"
+                                  : " (input dropped, retrying)"));
+                    if (!reset) Thread.Sleep(450);
+                }
                 SetThreadExecutionState(ES_CONTINUOUS);
-                Log("wake diagnostic: display-required hold released");
+                Log("wake diagnostic: hold released, timer " + (reset ? "reset" : "NOT reset"));
             }
             catch { }
         });
