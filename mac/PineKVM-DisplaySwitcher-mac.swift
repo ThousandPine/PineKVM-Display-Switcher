@@ -1,13 +1,14 @@
 // PineKVM-DisplaySwitcher-mac - Mac 端监听工具（与 Windows 端互补）
 // 作用: 共享键鼠被切走 -> 熄屏让显示器自动跳到 Windows；键鼠回来 -> 唤醒
-// 编译: xcrun swiftc -O -swift-version 5 -o PineKVM-DisplaySwitcher-mac src/PineKVM-DisplaySwitcher-mac.swift
-//       （或双击 src/编译.command）
+// 编译: xcrun swiftc -O -swift-version 5 -o PineKVM-DisplaySwitcher-mac PineKVM-DisplaySwitcher-mac.swift
+//       （或双击 编译.command）
 // 依赖: 无额外依赖（Foundation + IOKit，系统自带）
 
 import Foundation
 import IOKit
+import IOKit.hid  // IOHIDManager（事件驱动检测）
 
-// ---------- 全局状态（镜像 C# 版结构） ----------
+// ---------- 全局状态 ----------
 
 struct DevicePattern: Hashable, CustomStringConvertible {
     let vid: UInt32
@@ -16,7 +17,6 @@ struct DevicePattern: Hashable, CustomStringConvertible {
 }
 
 var logPath = ""
-var pollIntervalMs = 1000
 var confirmSeconds = 0.5
 // 键鼠模式只来自配置文件；配置缺失则为空数组，工具不会匹配任何设备
 var keyboardPatterns: [DevicePattern] = []
@@ -31,13 +31,18 @@ var baseDir: String {
 
 private let logStamp: DateFormatter = {
     let f = DateFormatter()
-    f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"  // 毫秒级：区分同一秒内的连续事件（如插拔回调顺序）
     return f
 }()
 
 // ---------- 日志（同目录 PineKVM-DisplaySwitcher.log，不可写时回退 ~/Library/Logs） ----------
 
-func log(_ message: String) {
+// 时间戳格式化在锁内完成（DateFormatter 非线程安全）
+private let logLock = NSLock()
+
+func appendLogLine(_ message: String) {
+    logLock.lock()
+    defer { logLock.unlock() }
     let line = logStamp.string(from: Date()) + "  " + message + "\n"
     var target = logPath
     if target.isEmpty {
@@ -62,9 +67,16 @@ func log(_ message: String) {
             fh.seekToEndOfFile()
             fh.write(line.data(using: .utf8)!)
             logPath = fb.path
-            log("Log fallback to: " + fb.path)
+            // 直接追加回退说明（已持锁，不能递归调 log()）
+            let note = logStamp.string(from: Date()) + "  Log fallback to: " + fb.path + "\n"
+            fh.seekToEndOfFile()
+            fh.write(note.data(using: .utf8)!)
         }
     }
+}
+
+func log(_ message: String) {
+    appendLogLine(message)
 }
 
 // ---------- 子进程 ----------
@@ -120,7 +132,7 @@ func stopPreviousInstances() {
     }
 }
 
-// ---------- 配置加载（与 Windows 版同格式：PollIntervalSec / ConfirmSeconds / KeyboardPatterns / MousePatterns） ----------
+// ---------- 配置加载（与 Windows 版共用同一份配置；ConfirmSeconds / KeyboardPatterns / MousePatterns，PollIntervalSec 仅 Windows 端轮询用） ----------
 
 func parsePatterns(_ raw: String) -> [DevicePattern] {
     var out: [DevicePattern] = []
@@ -161,8 +173,6 @@ func loadConfig() -> String? {
             let key = line[..<eq].trimmingCharacters(in: .whitespaces).lowercased()
             let val = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
             switch key {
-            case "pollintervalsec":
-                if let n = Int(val), n >= 1 { pollIntervalMs = n * 1000 }
             case "confirmseconds":
                 if let d = Double(val), d >= 0 { confirmSeconds = d }
             case "keyboardpatterns":
@@ -178,7 +188,7 @@ func loadConfig() -> String? {
     return nil
 }
 
-// ---------- 设备扫描（IOKit 枚举 IOHIDDevice，按配置 VID/PID 匹配） ----------
+// ---------- 设备枚举（仅 --check 诊断用；运行检测走上面的事件驱动，不经此函数） ----------
 
 func numValue(_ dict: [String: Any], _ key: String) -> Int? {
     if let n = dict[key] as? NSNumber { return n.intValue }
@@ -214,26 +224,6 @@ struct HIDDeviceInfo {
     var pattern: DevicePattern { DevicePattern(vid: vid, pid: pid) }
 }
 
-// 运行循环用：内核侧按 VID/PID 匹配，只问"有没有匹配设备在线"。
-// 不拉取任何设备属性（对比 scanMatchedDevices 的 IORegistryEntryCreateCFProperties：
-// 每次轮询每台设备都要从内核搬整份属性字典 + mach 消息，实测单核 ~28% CPU）。
-// 每个 (VID,PID) 模式一次轻量匹配调用，内核过滤后只返回命中的条目。
-func anyMatchedDevicePresent() -> Bool {
-    let patterns = Array(Set(keyboardPatterns + mousePatterns))
-    guard !patterns.isEmpty else { return false }
-    for p in patterns {
-        guard let matching = IOServiceMatching("IOHIDDevice") else { continue }
-        let dict = matching as NSMutableDictionary
-        dict["VendorID"] = NSNumber(value: p.vid)
-        dict["ProductID"] = NSNumber(value: p.pid)
-        var iter: io_iterator_t = 0
-        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iter) == KERN_SUCCESS else { continue }
-        defer { IOObjectRelease(iter) }
-        if IOIteratorNext(iter) != 0 { return true }
-    }
-    return false
-}
-
 func scanMatchedDevices() -> [HIDDeviceInfo] {
     var out: [HIDDeviceInfo] = []
     let allPatterns = Set(keyboardPatterns + mousePatterns)
@@ -261,7 +251,83 @@ func scanMatchedDevices() -> [HIDDeviceInfo] {
     return out
 }
 
-// ---------- 熄屏 / 唤醒（镜像 C# 的 SetMonitorPower） ----------
+// ---------- 事件驱动检测（IOHIDManager） ----------
+// 无任何轮询：设备插拔由 IOHIDManager 匹配回调实时通知（实测插拔后 ~1ms 内送达，
+// 对比 1s 轮询最坏落后 1s）。语义与原轮询版一致：
+//   全部匹配设备消失满 ConfirmSeconds -> 熄屏（防 USB 偶发重枚举误触发）
+//   任一匹配设备回来 -> 唤醒
+
+var hidManager: IOHIDManager? = nil
+var presentCount = 0            // 事件路径跟踪的在线设备数（初始到达回调建基线）
+var armed = false               // 本会话至少见过一次设备在线
+var blanked = false
+var confirmTimer: Timer? = nil
+var missingSince: Date? = nil
+
+// 设备状态变化（事件回调触发，主 run loop 线程）
+func onPresentStateChange() {
+    if presentCount > 0 {
+        if confirmTimer != nil {
+            confirmTimer?.invalidate()
+            confirmTimer = nil
+        }
+        if blanked {
+            blanked = false               // 先复位再执行阻塞调用：Process.waitUntilExit 会泵 run loop，可能重入本函数
+            log("Shared devices are back; waking monitor")
+            wakeDisplay()
+        }
+        armed = true
+        missingSince = nil
+    } else if armed {
+        if confirmTimer == nil {
+            missingSince = Date()
+            log("Shared keyboard and mouse disappeared; waiting to confirm...")
+            let t = Timer(timeInterval: confirmSeconds, repeats: false) { _ in
+                confirmTimer = nil
+                if presentCount <= 0 {
+                    let gone = Date().timeIntervalSince(missingSince ?? Date())
+                    log("Both gone for " + String(format: "%.1f", gone)
+                        + "s; turning monitor off so it auto-switches to Windows")
+                    blanked = true
+                    armed = false
+                    missingSince = nil
+                    setDisplaySleep()   // 状态先落定再阻塞调用，重入时状态一致
+                }
+            }
+            confirmTimer = t
+            RunLoop.main.add(t, forMode: .default)
+        }
+    }
+}
+
+func hidArrivalCallback() { presentCount += 1; onPresentStateChange() }
+func hidRemovalCallback() { if presentCount > 0 { presentCount -= 1 }; onPresentStateChange() }
+
+func startDetection() {
+    let patterns = Array(Set(keyboardPatterns + mousePatterns))
+    guard !patterns.isEmpty else {
+        log("No device patterns; tool will not trigger")
+        return
+    }
+    let dicts = patterns.map { p -> CFMutableDictionary in
+        let d = IOServiceMatching("IOHIDDevice")! as NSMutableDictionary
+        d["VendorID"] = NSNumber(value: p.vid)
+        d["ProductID"] = NSNumber(value: p.pid)
+        return d as CFMutableDictionary
+    } as CFArray
+    let m = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+    hidManager = m
+    IOHIDManagerSetDeviceMatchingMultiple(m, dicts)
+    // 到达/移除回调（@convention(c)，只引用全局）
+    IOHIDManagerRegisterDeviceMatchingCallback(m, { _, _, _, _ in hidArrivalCallback() }, nil)
+    IOHIDManagerRegisterDeviceRemovalCallback(m, { _, _, _, _ in hidRemovalCallback() }, nil)
+    IOHIDManagerScheduleWithRunLoop(m, RunLoop.main.getCFRunLoop(), CFRunLoopMode.defaultMode.rawValue)
+    if let set = IOHIDManagerCopyDevices(m) {
+        log("Initial matched devices: \(CFSetGetCount(set))")
+    }
+}
+
+// ---------- 熄屏 / 唤醒 ----------
 
 func setDisplaySleep() {
     runProcess("/usr/bin/pmset", ["displaysleepnow"])
@@ -271,48 +337,15 @@ func wakeDisplay() {
     runProcess("/usr/bin/caffeinate", ["-u", "-t", "1"])
 }
 
-// ---------- 主循环（逐行对齐 C# 的 Run()） ----------
+// ---------- 主循环（事件驱动 + run loop，无轮询） ----------
 
 func run() {
-    var armed = false
-    var blanked = false
-    var missingSince: Date? = nil
-
     log("PineKVM-DisplaySwitcher started (mac). Keyboard: "
         + keyboardPatterns.map { $0.description }.joined(separator: ", ")
         + "; Mouse: " + mousePatterns.map { $0.description }.joined(separator: ", "))
 
-    while true {
-        let present = anyMatchedDevicePresent()
-
-        if present {
-            if blanked {
-                log("Shared devices are back; waking monitor")
-                wakeDisplay()
-                blanked = false
-            }
-            armed = true
-            missingSince = nil
-        } else if armed && !present {
-            if missingSince == nil {
-                missingSince = Date()
-                log("Shared keyboard and mouse disappeared; waiting to confirm...")
-            }
-            let gone = Date().timeIntervalSince(missingSince!)
-            if gone >= confirmSeconds {
-                log("Both gone for " + String(format: "%.1f", gone)
-                    + "s; turning monitor off so it auto-switches to Windows")
-                setDisplaySleep()
-                blanked = true
-                armed = false
-                missingSince = nil
-            }
-        } else {
-            missingSince = nil
-        }
-
-        Thread.sleep(forTimeInterval: TimeInterval(pollIntervalMs) / 1000.0)
-    }
+    startDetection()
+    RunLoop.main.run()
 }
 
 // ---------- --check：诊断（列出当前匹配设备，无需硬件即可验证配置） ----------
@@ -320,7 +353,7 @@ func run() {
 func check() {
     print("PineKVM-DisplaySwitcher-mac --check")
     print("Config file: " + (configCandidates().first { FileManager.default.fileExists(atPath: $0) } ?? "(not found - no device patterns, tool will not trigger)"))
-    print("PollIntervalSec: \(pollIntervalMs / 1000)   ConfirmSeconds: \(String(format: "%.1f", confirmSeconds))")
+    print("ConfirmSeconds: " + String(format: "%.1f", confirmSeconds))
     print("KeyboardPatterns: " + keyboardPatterns.map { $0.description }.joined(separator: ", "))
     print("MousePatterns: " + mousePatterns.map { $0.description }.joined(separator: ", "))
     print("Matched HID devices:")

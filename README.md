@@ -22,7 +22,7 @@ KVM 双端联动工具：当共享键鼠被 USB KVM 切走后，另一台电脑�
 
 ### Mac 端
 
-- 进程名 `PineKVM-DisplaySwitcher-mac`，IOKit 轮询 + `pmset displaysleepnow` 熄屏、`caffeinate -u` 唤醒
+- 进程名 `PineKVM-DisplaySwitcher-mac`，IOHIDManager 事件驱动检测（插拔回调 ~1ms 内送达）+ `pmset displaysleepnow` 熄屏、`caffeinate -u` 唤醒
 - 源码 `mac/PineKVM-DisplaySwitcher-mac.swift`，swiftc 编译，无额外依赖
 - 开机自启：LaunchAgent（`com.pinekvm.display-switcher`）
 - 诊断：`./PineKVM-DisplaySwitcher-mac --check` 列出当前匹配到的共享键鼠设备
@@ -35,7 +35,7 @@ KVM 双端联动工具：当共享键鼠被 USB KVM 切走后，另一台电脑�
 
 ## 工作原理
 
-1. 后台轮询共享键鼠是否还存在
+1. 事件驱动监听共享键鼠是否还存在（IOHIDManager 设备插拔回调，~1ms 内送达，无轮询）
 2. 两者同时消失满确认时间 → 判定已切走 → Windows 显示器进入 DPMS 熄屏
 3. 显示器检测到当前输入无信号 → 自动跳到另一台电脑的输入
 4. 键鼠切回 → 自动唤醒显示器
@@ -107,7 +107,7 @@ PineKVM-Display-Switcher/
 
 配置文件**只有一份**，放在仓库根目录 `PineKVM-DisplaySwitcher.config`，两端共用。工具启动时按「自身所在目录 → 项目根目录」的顺序查找：
 
-- `PollIntervalSec`：轮询间隔（秒，整数，最小 1）
+- `PollIntervalSec`：**仅 Windows 端**轮询间隔（秒，整数，最小 1）；Mac 端为事件驱动，不使用此键
 - `ConfirmSeconds`：键鼠同时消失多久后触发（秒，默认 0.5，支持小数）
 - `KeyboardPatterns` / `MousePatterns`：共享键鼠的 VID/PID 前缀，分号分隔
 
