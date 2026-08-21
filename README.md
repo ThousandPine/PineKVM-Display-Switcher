@@ -18,7 +18,7 @@ KVM 双端联动工具：当共享键鼠被 USB KVM 切走后，另一台电脑�
 
 ### Windows 端
 
-- 进程名 `PineKVM-DisplaySwitcher.exe`，WMI 轮询 + DPMS 熄屏
+- 进程名 `PineKVM-DisplaySwitcher.exe`，WM_DEVICECHANGE 事件驱动检测（内核插拔通知实时送达）+ DPMS 熄屏
 
 ### Mac 端
 
@@ -35,7 +35,7 @@ KVM 双端联动工具：当共享键鼠被 USB KVM 切走后，另一台电脑�
 
 ## 工作原理
 
-1. 事件驱动监听共享键鼠是否还存在（IOHIDManager 设备插拔回调，~1ms 内送达，无轮询）
+1. 事件驱动监听共享键鼠是否还存在（Mac：IOHIDManager 插拔回调；Windows：WM_DEVICECHANGE 设备接口通知——均为内核实时推送，无轮询）
 2. 两者同时消失满确认时间 → 判定已切走 → Windows 显示器进入 DPMS 熄屏
 3. 显示器检测到当前输入无信号 → 自动跳到另一台电脑的输入
 4. 键鼠切回 → 自动唤醒显示器
@@ -69,7 +69,7 @@ PineKVM-Display-Switcher/
 
 1. 双击 `设置开机自启.bat`（推荐，开机自动运行；会先移除旧注册再重新注册，可重复点击）
 2. 立即运行：双击 `启动.bat`（会自动先停止旧实例再启动新实例）
-3. 按 KVM 切到 Mac：约 1~2 秒后 Windows 熄屏，显示器自动跳转到 Mac
+3. 按 KVM 切到 Mac：约 0.5~1 秒内 Windows 熄屏（事件实时送达 + 确认时间），显示器自动跳转到 Mac
 4. 切回 Windows：键鼠回来后屏幕自动唤醒
 
 命令行（在 `win\` 目录运行）：
@@ -87,7 +87,7 @@ PineKVM-Display-Switcher/
 1. 双击 `编译.command` 编译（需要已安装 Xcode 命令行工具，仅首次/改源码后需要）
 2. 双击 `设置开机自启.command`（LaunchAgent：`com.pinekvm.display-switcher`，开机自动运行；可重复点击）
 3. 立即运行：双击 `启动.command`
-4. 按 KVM 切到 Windows：约 1~2 秒后 Mac 熄屏，显示器自动跳转到 Windows
+4. 按 KVM 切到 Windows：约 0.5~1 秒内 Mac 熄屏（插拔回调实时送达 + 确认时间），显示器自动跳转到 Windows
 5. 切回 Mac：键鼠回来后屏幕自动唤醒
 
 命令行（在 `mac/` 目录运行）：
@@ -107,7 +107,6 @@ PineKVM-Display-Switcher/
 
 配置文件**只有一份**，放在仓库根目录 `PineKVM-DisplaySwitcher.config`，两端共用。工具启动时按「自身所在目录 → 项目根目录」的顺序查找：
 
-- `PollIntervalSec`：**仅 Windows 端**轮询间隔（秒，整数，最小 1）；Mac 端为事件驱动，不使用此键
 - `ConfirmSeconds`：键鼠同时消失多久后触发（秒，默认 0.5，支持小数）
 - `KeyboardPatterns` / `MousePatterns`：共享键鼠的 VID/PID 前缀，分号分隔
 
@@ -141,7 +140,7 @@ Mac 端可用 `./PineKVM-DisplaySwitcher-mac --check` 确认实际加载的配�
 
 ## 故障排查
 
-- **不切换**：确认显示器 OSD 的自动输入源已开启且输入源模式为“自动”；查看日志是否有 `disappeared` / `turning monitor off`；确认配置里的键鼠 ID 匹配当前设备（Mac 上用 `--check` 核对）。
+- **不切换**：确认显示器 OSD 的自动输入源已开启且输入源模式为“自动”；查看日志是否有 `disappeared` / `turning monitor off`；确认配置里的键鼠 ID 匹配当前设备（Mac 上用 `--check` 核对）。Windows 端可看日志里 `Device notifications registered: keyboard=True, mouse=True`——任一为 False 表示通知注册失败，工具将无法感知切换，需重启工具。
 - **黑屏但不跳输入**：检查 OSD 输入源设置；移动鼠标可唤醒本机显示器。
 - **误切换**：共享键鼠消失满配置的确认时间才会触发；故意拔掉键鼠清理时会触发一次，属正常。
 - **重复启动**：会先停止旧实例再启动新实例，日志记录 `Stopping previous instance`。

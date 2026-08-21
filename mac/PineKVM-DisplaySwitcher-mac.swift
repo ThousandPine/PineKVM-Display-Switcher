@@ -132,7 +132,7 @@ func stopPreviousInstances() {
     }
 }
 
-// ---------- 配置加载（与 Windows 版共用同一份配置；ConfirmSeconds / KeyboardPatterns / MousePatterns，PollIntervalSec 仅 Windows 端轮询用） ----------
+// ---------- 配置加载（与 Windows 版共用同一份配置；ConfirmSeconds / KeyboardPatterns / MousePatterns） ----------
 
 func parsePatterns(_ raw: String) -> [DevicePattern] {
     var out: [DevicePattern] = []
